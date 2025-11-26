@@ -16,7 +16,5 @@ python:
     - pydantic
     - joblib
   lock_packages: false
-docker:
-  # Add this section to disable locking
-  #lock_packages: false
+
 

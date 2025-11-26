@@ -1,0 +1,8 @@
+aquasmart-bento/
+  bentofile.yaml
+  service.py
+  models/
+    primary_full_model.pkl
+    biological_full_model.pkl
+    tertiary_full_model.pkl
+  requirements.txt

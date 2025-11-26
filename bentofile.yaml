@@ -1,0 +1,17 @@
+service: "service:AquaSmartService"
+
+labels:
+  project: "aquasmart"
+  stage: "sih-2025"
+
+include:
+  - "service.py"
+  - "models/"
+
+python:
+  packages:
+    - scikit-learn
+    - xgboost
+    - bentoml
+    - pydantic
+    - joblib

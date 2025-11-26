@@ -15,3 +15,7 @@ python:
     - bentoml
     - pydantic
     - joblib
+
+docker:
+  # Add this section to disable locking
+  lock_packages: false

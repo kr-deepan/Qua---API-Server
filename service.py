@@ -489,7 +489,7 @@ def primary_feasible(outputs: dict) -> bool:
         and outputs["COD_final_mgL"] <= 150.0
         and outputs["TSS_final_mgL"] <= 30.0
     )
-
+#BY K R DEEPAN STARTED ON 25th NOVEMBER 2025 FOR SIH 2025
 # BIOLOGICAL
 def bio_efficiency_score(outputs: dict) -> float:
     bod_tot = outputs["BOD_total_eff_pct"]
@@ -743,3 +743,4 @@ class AquaSmartService:
                 for c in best
             ],
         }
+

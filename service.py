@@ -1,7 +1,9 @@
+# service.py
 import numpy as np
 import joblib
 import bentoml
 import random
+from typing import Dict, List
 
 # ---------------------------------------------------------
 # Model paths (relative to this file)
@@ -73,7 +75,6 @@ TER_TARGET_COLS = [
 # ---------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------
-
 def energy_per_m3(energy_kwh_day: float, Q_mld: float):
     Q_m3_day = Q_mld * 1000.0
     if Q_m3_day <= 0:
@@ -93,6 +94,7 @@ def sample_config_around(current: dict, bounds: dict, scale: float = 0.3):
     for key, (low, high) in bounds.items():
         cur = current.get(key, None)
         if cur is None:
+            # if cur not provided, sample globally within bounds
             if isinstance(low, int) and isinstance(high, int):
                 candidate[key] = random.randint(low, high)
             else:
@@ -102,124 +104,79 @@ def sample_config_around(current: dict, bounds: dict, scale: float = 0.3):
             local_low = max(low, cur - scale * rng)
             local_high = min(high, cur + scale * rng)
             if isinstance(low, int) and isinstance(high, int):
+                # pick integer in local range
                 candidate[key] = int(round(random.uniform(local_low, local_high)))
             else:
                 candidate[key] = random.uniform(local_low, local_high)
     return candidate
 
 # ---------------------------------------------------------
-# RULE-BASED RECOMMENDATIONS
+# RULE-BASED RECOMMENDATIONS (unchanged logic, kept for UI)
 # ---------------------------------------------------------
-
 def recommend_screening(inp: dict, outp: dict):
     recs = []
-    eff = outp["screen_TSS_removal_eff_pct"]
-    bar_spacing = inp["bar_spacing_mm"]
-    velocity = inp["approach_velocity_ms"]
-    open_area = inp["open_area_fraction"]
-    Q = inp["Q_in_mld"]
-    e_kwh_day = outp["screen_energy_kwh_day"]
+    eff = outp.get("screen_TSS_removal_eff_pct", 0.0)
+    bar_spacing = inp.get("bar_spacing_mm", None)
+    velocity = inp.get("approach_velocity_ms", None)
+    open_area = inp.get("open_area_fraction", None)
+    Q = inp.get("Q_in_mld", 0.0)
+    e_kwh_day = outp.get("screen_energy_kwh_day", 0.0)
     epm3 = energy_per_m3(e_kwh_day, Q)
 
     if eff < 25:
-        if bar_spacing > 15:
-            recs.append(
-                f"Screening efficiency is low ({eff:.1f}%). Reduce bar spacing from {bar_spacing:.1f} mm towards 10–15 mm."
-            )
-        if velocity < 0.7 or velocity > 1.0:
-            recs.append(
-                f"Approach velocity is {velocity:.2f} m/s. Adjust to 0.7–0.9 m/s."
-            )
-        if open_area < 0.5:
-            recs.append(
-                f"Open area fraction is {open_area:.2f}. Consider screens with ≥0.5 open area."
-            )
-    if epm3 and epm3 > 0.015:
-        recs.append(
-            f"Screening specific energy is about {epm3*1000:.1f} Wh/m³. Optimize screen runtime."
-        )
-    if not recs:
-        recs.append(
-            f"Screening is operating efficiently ({eff:.1f}% TSS removal). Maintain current settings."
-        )
+        if bar_spacing and bar_spacing > 15: recs.append(f"Screening efficiency is low ({eff:.1f}%). Reduce bar spacing from {bar_spacing:.1f} mm towards 10–15 mm.")
+        if velocity and (velocity < 0.7 or velocity > 1.0): recs.append(f"Approach velocity is {velocity:.2f} m/s. Adjust to 0.7–0.9 m/s.")
+        if open_area and open_area < 0.5: recs.append(f"Open area fraction is {open_area:.2f}. Consider screens with ≥0.5 open area.")
+    if epm3 and epm3 > 0.015: recs.append(f"Screening specific energy is about {epm3*1000:.1f} Wh/m³. Optimize screen runtime.")
+    if not recs: recs.append(f"Screening is operating efficiently ({eff:.1f}% TSS removal). Maintain current settings.")
     return recs
 
 def recommend_grit(inp: dict, outp: dict):
     recs = []
-    eff = outp["grit_removal_eff_pct"]
-    v = inp["inlet_velocity_ms"]
-    dt = inp["detention_time_s"]
-    grit_type = "aerated" if inp["grit_type"] == 1 else "plain"
+    eff = outp.get("grit_removal_eff_pct", 0.0)
+    v = inp.get("inlet_velocity_ms", 0.0)
+    dt = inp.get("detention_time_s", 0.0)
+    grit_type = "aerated" if inp.get("grit_type", 0) == 1 else "plain"
     if eff < 60:
-        recs.append(
-            f"Grit removal efficiency is {eff:.1f}%. Increase detention time towards 60–80 s."
-        )
-        if dt < 50:
-            recs.append(
-                f"Current detention time is {dt:.0f} s. Increase tank volume."
-            )
-        if v > 0.35:
-            recs.append(
-                f"Inlet velocity {v:.2f} m/s is high. Adjust to < 0.30 m/s."
-            )
+        recs.append(f"Grit removal efficiency is {eff:.1f}%. Increase detention time towards 60–80 s.")
+        if dt < 50: recs.append(f"Current detention time is {dt:.0f} s. Increase tank volume.")
+        if v > 0.35: recs.append(f"Inlet velocity {v:.2f} m/s is high. Adjust to < 0.30 m/s.")
     if grit_type == "aerated":
-        e = outp["grit_energy_kwh_day"]
-        if e > 10:
-            recs.append(
-                f"Aerated grit energy {e:.1f} kWh/d. Optimize blower."
-            )
-    if not recs:
-        recs.append(
-            f"Grit removal is stable ({eff:.1f}%). Maintain current operation."
-        )
+        e = outp.get("grit_energy_kwh_day", 0.0)
+        if e > 10: recs.append(f"Aerated grit energy {e:.1f} kWh/d. Optimize blower.")
+    if not recs: recs.append(f"Grit removal is stable ({eff:.1f}%). Maintain current operation.")
     return recs
 
 def recommend_sedimentation(inp: dict, outp: dict):
     recs = []
-    tss_eff = outp["sed_TSS_removal_eff_pct"]
-    HRT = inp["HRT_h"]
-    SLR = inp["surface_loading_rate_m3m2h"]
-    weir_load = inp["weir_loading_m3mh"]
-    if tss_eff < 50:
-        recs.append(
-            f"Primary clarifier TSS removal ({tss_eff:.1f}%) is low. Increase HRT or reduce SLR."
-        )
-    if HRT < 1.5:
-        recs.append(f"HRT is {HRT:.2f} h. Increase volume.")
-    if SLR > 3.0:
-        recs.append(f"SLR is {SLR:.2f} m³/m²·h (high).")
-    if weir_load > 20:
-        recs.append(f"Weir loading {weir_load:.1f} m³/m·h is high.")
-    if not recs:
-        recs.append(
-            f"Primary sedimentation is performing well ({tss_eff:.1f}% removal). Maintain current settings."
-        )
+    tss_eff = outp.get("sed_TSS_removal_eff_pct", 0.0)
+    HRT = inp.get("HRT_h", 0.0)
+    SLR = inp.get("surface_loading_rate_m3m2h", 0.0)
+    weir_load = inp.get("weir_loading_m3mh", 0.0)
+    if tss_eff < 50: recs.append(f"Primary clarifier TSS removal ({tss_eff:.1f}%) is low. Increase HRT or reduce SLR.")
+    if HRT < 1.5: recs.append(f"HRT is {HRT:.2f} h. Increase volume.")
+    if SLR > 3.0: recs.append(f"SLR is {SLR:.2f} m³/m²·h (high).")
+    if weir_load > 20: recs.append(f"Weir loading {weir_load:.1f} m³/m·h is high.")
+    if not recs: recs.append(f"Primary sedimentation is performing well ({tss_eff:.1f}% removal). Maintain current settings.")
     return recs
 
 def recommend_daf(inp: dict, outp: dict):
     recs = []
-    tss_eff = outp["daf_TSS_removal_eff_pct"]
-    og_eff = outp["daf_OG_removal_eff_pct"]
-    recycle = inp["recycle_ratio_pct"]
-    coagulant = inp["coagulant_dose_mgL"]
-    bubbles = inp["bubble_diameter_um"]
-    Q = inp["Q_in_mld"]
-    e = outp["daf_energy_kwh_day"]
+    tss_eff = outp.get("daf_TSS_removal_eff_pct", 0.0)
+    og_eff = outp.get("daf_OG_removal_eff_pct", 0.0)
+    recycle = inp.get("recycle_ratio_pct", 0.0)
+    coagulant = inp.get("coagulant_dose_mgL", 0.0)
+    bubbles = inp.get("bubble_diameter_um", 0.0)
+    Q = inp.get("Q_in_mld", 0.0)
+    e = outp.get("daf_energy_kwh_day", 0.0)
     epm3 = energy_per_m3(e, Q)
     if tss_eff < 70 or og_eff < 80:
         recs.append("DAF removal modest. Increase coagulant/recycle.")
-        if coagulant < 30:
-            recs.append(f"Coagulant {coagulant:.1f} mg/L is low.")
-        if recycle < 10:
-            recs.append(f"Recycle {recycle:.1f}% is low.")
-        if bubbles > 100:
-            recs.append(f"Bubbles {bubbles:.0f} µm are large.")
-    if epm3 and epm3 > 0.05:
-        recs.append(
-            f"DAF specific energy high ({epm3*1000:.1f} Wh/m³)."
-        )
-    if not recs:
-        recs.append("DAF is achieving high removals. Maintain current settings.")
+        if coagulant < 30: recs.append(f"Coagulant {coagulant:.1f} mg/L is low.")
+        if recycle < 10: recs.append(f"Recycle {recycle:.1f}% is low.")
+        if bubbles > 100: recs.append(f"Bubbles {bubbles:.0f} µm are large.")
+    if epm3 and epm3 > 0.05: recs.append(f"DAF specific energy high ({epm3*1000:.1f} Wh/m³).")
+    if not recs: recs.append("DAF is achieving high removals. Maintain current settings.")
     return recs
 
 def generate_recommendations_primary(inputs: dict, outputs: dict):
@@ -232,83 +189,48 @@ def generate_recommendations_primary(inputs: dict, outputs: dict):
 
 def recommend_asp(inp: dict, outp: dict):
     recs = []
-    bod_eff = outp["BOD_eff_AS_pct"]
-    nh4_eff = outp["NH4_eff_AS_pct"]
-    MLSS = inp["MLSS_mgL"]
-    DO = inp["DO_mgL"]
-    FM = inp["F_M_ratio_kgkgd"]
-    if bod_eff < 85:
-        recs.append(
-            f"ASP BOD removal {bod_eff:.1f}% low. Increase SRT or MLSS."
-        )
-    if nh4_eff < 40:
-        recs.append(
-            f"Nitrification low ({nh4_eff:.1f}%). Keep DO > 2 mg/L and sufficient SRT."
-        )
-    if DO < 1.5:
-        recs.append(
-            f"DO {DO:.2f} mg/L is low. Increase aeration."
-        )
-    if FM > 0.5:
-        recs.append(
-            f"F/M {FM:.2f} is high; consider increasing MLSS or HRT."
-        )
-    if not recs:
-        recs.append("ASP is performing well. Maintain current operation.")
+    bod_eff = outp.get("BOD_eff_AS_pct", 0.0)
+    nh4_eff = outp.get("NH4_eff_AS_pct", 0.0)
+    MLSS = inp.get("MLSS_mgL", None)
+    DO = inp.get("DO_mgL", None)
+    FM = inp.get("F_M_ratio_kgkgd", None)
+    if bod_eff < 85: recs.append(f"ASP BOD removal {bod_eff:.1f}% low. Increase SRT or MLSS.")
+    if nh4_eff < 40: recs.append(f"Nitrification low ({nh4_eff:.1f}%). Keep DO > 2 mg/L and sufficient SRT.")
+    if DO is not None and DO < 1.5: recs.append(f"DO {DO:.2f} mg/L is low. Increase aeration.")
+    if FM is not None and FM > 0.5: recs.append(f"F/M {FM:.2f} is high; consider increasing MLSS or HRT.")
+    if not recs: recs.append("ASP is performing well. Maintain current operation.")
     return recs
 
 def recommend_biofilter(inp: dict, outp: dict):
     recs = []
-    nh4_eff = outp["NH4_eff_bio_pct"]
-    BOD_polish = outp["BOD_polish_eff_pct"]
-    HRT = inp["HRT_bio_h"]
-    air = inp["air_flow_m3m2min"]
-    if nh4_eff < 70:
-        recs.append(
-            f"Biofilter NH4 removal {nh4_eff:.1f}% low. Check media loading and DO."
-        )
-    if HRT < 3:
-        recs.append(
-            f"Biofilter HRT {HRT:.1f} h low. Increase volume or reduce flow."
-        )
-    if air < 1.0:
-        recs.append(
-            f"Air flow {air:.2f} m³/m²·min low. Increase aeration."
-        )
-    if BOD_polish < 10:
-        recs.append(
-            f"BOD polish {BOD_polish:.1f}% low. Check upstream ASP performance."
-        )
-    if not recs:
-        recs.append("Biofilter is providing good polishing. Maintain settings.")
+    nh4_eff = outp.get("NH4_eff_bio_pct", 0.0)
+    BOD_polish = outp.get("BOD_polish_eff_pct", 0.0)
+    HRT = inp.get("HRT_bio_h", 0.0)
+    air = inp.get("air_flow_m3m2min", 0.0)
+    if nh4_eff < 70: recs.append(f"Biofilter NH4 removal {nh4_eff:.1f}% low. Check media loading and DO.")
+    if HRT < 3: recs.append(f"Biofilter HRT {HRT:.1f} h low. Increase volume or reduce flow.")
+    if air < 1.0: recs.append(f"Air flow {air:.2f} m³/m²·min low. Increase aeration.")
+    if BOD_polish < 10: recs.append(f"BOD polish {BOD_polish:.1f}% low. Check upstream ASP performance.")
+    if not recs: recs.append("Biofilter is providing good polishing. Maintain settings.")
     return recs
 
 def recommend_bio_overall(outp: dict):
     recs = []
-    BOD_tot = outp["BOD_total_eff_pct"]
-    NH4_tot = outp["NH4_total_eff_pct"]
-    oxy = outp["oxygen_utilization_pct"]
-    energy = outp["total_bio_energy_kwh_day"]
+    BOD_tot = outp.get("BOD_total_eff_pct", 0.0)
+    NH4_tot = outp.get("NH4_total_eff_pct", 0.0)
+    oxy = outp.get("oxygen_utilization_pct", 0.0)
+    energy = outp.get("total_bio_energy_kwh_day", 0.0)
 
-    # 🔧 TWEAKED: Threshold from < 90 to < 88 so 88–89% is not flagged as "low"
+    # TWEAKED: Threshold from < 90 to < 88
     if BOD_tot < 88:
-        recs.append(
-            f"Overall BOD removal {BOD_tot:.1f}% could be improved. Check ASP and biofilter loadings."
-        )
+        recs.append(f"Overall BOD removal {BOD_tot:.1f}% could be improved. Check ASP and biofilter loadings.")
     if NH4_tot < 80:
-        recs.append(
-            f"Total NH4 removal {NH4_tot:.1f}% low. Increase SRT/DO."
-        )
+        recs.append(f"Total NH4 removal {NH4_tot:.1f}% low. Increase SRT/DO.")
     if oxy < 70:
-        recs.append(
-            f"Oxygen utilization {oxy:.1f}% low. Aeration may be inefficient."
-        )
+        recs.append(f"Oxygen utilization {oxy:.1f}% low. Aeration may be inefficient.")
     if energy > 200:
-        recs.append(
-            f"Biological energy {energy:.1f} kWh/d high. Optimize blowers and recycle."
-        )
-    if not recs:
-        recs.append("Biological system is performing well.")
+        recs.append(f"Biological energy {energy:.1f} kWh/d high. Optimize blowers and recycle.")
+    if not recs: recs.append("Biological system is performing well.")
     return recs
 
 def generate_recommendations_biological(inputs: dict, outputs: dict):
@@ -320,63 +242,40 @@ def generate_recommendations_biological(inputs: dict, outputs: dict):
 
 def recommend_membrane(inp: dict, outp: dict):
     recs = []
-    turb_out = outp["turbidity_after_membrane_NTU"]
-    tss_out = outp["TSS_after_membrane_mgL"]
-    pore = inp["membrane_pore_size_um"]
-    flux = inp["flux_LMH"]
+    turb_out = outp.get("turbidity_after_membrane_NTU", 0.0)
+    tss_out = outp.get("TSS_after_membrane_mgL", 0.0)
+    pore = inp.get("membrane_pore_size_um", None)
+    flux = inp.get("flux_LMH", None)
     if turb_out > 1.0 or tss_out > 5:
-        recs.append(
-            "Membrane effluent quality is poor. Check pore size and flux."
-        )
-        if pore > 0.2:
-            recs.append(
-                f"Pore size {pore:.2f} µm is large for fine polishing."
-            )
-        if flux > 80:
-            recs.append(
-                f"Flux {flux:.1f} LMH high; consider reducing to limit fouling."
-            )
-    if not recs:
-        recs.append("Membrane achieving low turbidity/TSS. Maintain operation.")
+        recs.append("Membrane effluent quality is poor. Check pore size and flux.")
+        if pore and pore > 0.2: recs.append(f"Pore size {pore:.2f} µm is large for fine polishing.")
+        if flux and flux > 80: recs.append(f"Flux {flux:.1f} LMH high; consider reducing to limit fouling.")
+    if not recs: recs.append("Membrane achieving low turbidity/TSS. Maintain operation.")
     return recs
 
 def recommend_uv(inp: dict, outp: dict):
     recs = []
-    LRV = outp["LRV_uv"]
-    ecoli = outp["Ecoli_final_CFU_100mL"]
-    dose = inp["UV_dose_mJcm2"]
-    UVT = inp["UVT_pct"]
+    LRV = outp.get("LRV_uv", 0.0)
+    ecoli = outp.get("Ecoli_final_CFU_100mL", 0.0)
+    dose = inp.get("UV_dose_mJcm2", None)
+    UVT = inp.get("UVT_pct", None)
     if LRV < 3 or ecoli > 10:
-        recs.append(
-            "UV disinfection is low. Increase dose or check UVT and lamp condition."
-        )
-        if dose < 30:
-            recs.append(
-                f"Dose {dose:.1f} mJ/cm² is low for high log removal."
-            )
-        if UVT < 85:
-            recs.append(
-                f"UVT {UVT:.1f}% low; improve upstream turbidity."
-            )
-    if not recs:
-        recs.append("UV providing strong disinfection. Maintain settings.")
+        recs.append("UV disinfection is low. Increase dose or check UVT and lamp condition.")
+        if dose and dose < 30: recs.append(f"Dose {dose:.1f} mJ/cm² is low for high log removal.")
+        if UVT and UVT < 85: recs.append(f"UVT {UVT:.1f}% low; improve upstream turbidity.")
+    if not recs: recs.append("UV providing strong disinfection. Maintain settings.")
     return recs
 
 def recommend_aop(inp: dict, outp: dict):
     recs = []
-    micro_final = outp["micropollutant_final_ugL"]
-    oz = inp["ozone_dose_mgL"]
-    h2o2 = inp["H2O2_mgL"]
+    micro_final = outp.get("micropollutant_final_ugL", 0.0)
+    oz = inp.get("ozone_dose_mgL", 0.0)
+    h2o2 = inp.get("H2O2_mgL", 0.0)
     if micro_final > 0.1:
-        recs.append(
-            f"Micropollutant residual {micro_final:.3f} µg/L high. Increase oxidant doses."
-        )
-        if oz < 5:
-            recs.append(f"Ozone {oz:.1f} mg/L low.")
-        if h2o2 < 50:
-            recs.append(f"H2O2 {h2o2:.1f} mg/L low.")
-    if not recs:
-        recs.append("AOP achieving good micropollutant removal. Maintain.")
+        recs.append(f"Micropollutant residual {micro_final:.3f} µg/L high. Increase oxidant doses.")
+        if oz < 5: recs.append(f"Ozone {oz:.1f} mg/L low.")
+        if h2o2 < 50: recs.append(f"H2O2 {h2o2:.1f} mg/L low.")
+    if not recs: recs.append("AOP achieving good micropollutant removal. Maintain.")
     return recs
 
 def generate_recommendations_tertiary(inputs: dict, outputs: dict):
@@ -387,28 +286,24 @@ def generate_recommendations_tertiary(inputs: dict, outputs: dict):
     }
 
 # ---------------------------------------------------------
-# OPTIMIZATION CONFIGS
+# OPTIMIZATION CONFIGS (only plant parameters in bounds)
 # ---------------------------------------------------------
-
 PRIMARY_OPT_BOUNDS = {
     "bar_spacing_mm": (3.0, 50.0),
     "approach_velocity_ms": (0.6, 1.0),
     "open_area_fraction": (0.40, 0.70),
     "num_screens": (1, 4),
-
     "inlet_velocity_ms": (0.20, 0.40),
     "detention_time_s": (30.0, 90.0),
     "chamber_length_m": (5.0, 20.0),
     "chamber_width_m": (1.5, 8.0),
     "water_depth_m": (2.0, 5.0),
-
     "air_flow_m3h_per_m": (0.0, 50.0),
     "HRT_h": (0.6, 5.9),
     "surface_loading_rate_m3m2h": (0.83, 4.2),
     "weir_loading_m3mh": (1.1, 200.0),
     "sludge_withdrawal_rate_m3h": (5.0, 80.0),
     "tank_surface_area_m2": (130.0, 1500.0),
-
     "recycle_ratio_pct": (5.0, 25.0),
     "air_release_pressure_bar": (3.0, 6.0),
     "coagulant_dose_mgL": (20.0, 80.0),
@@ -451,112 +346,154 @@ TER_OPT_BOUNDS = {
 }
 
 # ---------------------------------------------------------
-# SCORING & FEASIBILITY
+# Normalization helpers & expected ranges to stabilize scores
+# ---------------------------------------------------------
+ENERGY_EXPECTED_RANGES = {
+    "primary": {"min": 0.0, "max": 200.0},     # kWh/day - approximate envelope, tweak with data
+    "biological": {"min": 0.0, "max": 400.0},
+    "tertiary": {"min": 0.0, "max": 300.0},
+}
+
+EFFICIENCY_EXPECTED_RANGES = {
+    "primary": {"min": 0.0, "max": 100.0},
+    "biological": {"min": 0.0, "max": 100.0},
+    "tertiary": {"min": 0.0, "max": 100.0},
+}
+
+def _normalize(value: float, min_v: float, max_v: float) -> float:
+    try:
+        if max_v <= min_v:
+            return 0.0
+        v = (value - min_v) / (max_v - min_v)
+        return max(0.0, min(1.0, v))
+    except Exception:
+        return 0.0
+
+def _score_to_0_100(val: float) -> float:
+    # val expected in 0..1 (or close) -> 0..100
+    try:
+        return float(max(0.0, min(100.0, val * 100.0)))
+    except Exception:
+        return 0.0
+
+# ---------------------------------------------------------
+# SCORING & FEASIBILITY (normalized, consistent)
 # ---------------------------------------------------------
 
 # PRIMARY
-def primary_efficiency_score(outputs: dict) -> float:
-    sed_tss = outputs["sed_TSS_removal_eff_pct"]
-    daf_tss = outputs["daf_TSS_removal_eff_pct"]
-    daf_og = outputs["daf_OG_removal_eff_pct"]
-    bod_final = outputs["BOD5_final_mgL"]
-    cod_final = outputs["COD_final_mgL"]
-    tss_final = outputs["TSS_final_mgL"]
-    eff_part = 0.4 * sed_tss + 0.3 * daf_tss + 0.3 * daf_og
-    penalty = 0.1 * bod_final + 0.05 * cod_final + 0.2 * tss_final
-    return eff_part - penalty
+def primary_efficiency_metric(outputs: dict) -> float:
+    sed_tss = outputs.get("sed_TSS_removal_eff_pct", 0.0)
+    daf_tss = outputs.get("daf_TSS_removal_eff_pct", 0.0)
+    daf_og = outputs.get("daf_OG_removal_eff_pct", 0.0)
+    weighted_pct = 0.4 * sed_tss + 0.3 * daf_tss + 0.3 * daf_og
+    return _normalize(weighted_pct, EFFICIENCY_EXPECTED_RANGES["primary"]["min"], EFFICIENCY_EXPECTED_RANGES["primary"]["max"])
 
-def primary_energy_score(outputs: dict) -> float:
-    e_screen = outputs["screen_energy_kwh_day"]
-    e_grit = outputs["grit_energy_kwh_day"]
-    e_sed = outputs["sed_energy_kwh_day"]
-    e_daf = outputs["daf_energy_kwh_day"]
-    return e_screen + e_grit + e_sed + e_daf
+def primary_energy_metric(outputs: dict) -> float:
+    energy = (
+        outputs.get("screen_energy_kwh_day", 0.0)
+        + outputs.get("grit_energy_kwh_day", 0.0)
+        + outputs.get("sed_energy_kwh_day", 0.0)
+        + outputs.get("daf_energy_kwh_day", 0.0)
+    )
+    norm = _normalize(energy, ENERGY_EXPECTED_RANGES["primary"]["min"], ENERGY_EXPECTED_RANGES["primary"]["max"])
+    return 1.0 - norm  # invert: lower energy -> higher metric
 
 def primary_objective(outputs: dict, mode: str = "balanced") -> float:
-    eff = primary_efficiency_score(outputs)
-    energy = primary_energy_score(outputs)
+    eff = primary_efficiency_metric(outputs)
+    eng = primary_energy_metric(outputs)
     if mode == "efficiency":
-        return eff
+        combined = eff
     elif mode == "energy":
-        return -energy
+        combined = eng
     else:
-        return eff - 0.1 * energy
+        combined = 0.8 * eff + 0.2 * eng
+    return _score_to_0_100(combined)
 
 def primary_feasible(outputs: dict) -> bool:
     return (
-        outputs["BOD5_final_mgL"] <= 60.0
-        and outputs["COD_final_mgL"] <= 150.0
-        and outputs["TSS_final_mgL"] <= 30.0
+        outputs.get("BOD5_final_mgL", np.inf) <= 60.0
+        and outputs.get("COD_final_mgL", np.inf) <= 150.0
+        and outputs.get("TSS_final_mgL", np.inf) <= 30.0
     )
-#BY K R DEEPAN STARTED ON 25th NOVEMBER 2025 FOR SIH 2025
-# BIOLOGICAL
-def bio_efficiency_score(outputs: dict) -> float:
-    bod_tot = outputs["BOD_total_eff_pct"]
-    nh4_tot = outputs["NH4_total_eff_pct"]
-    system_eff = outputs["system_efficiency_pct"]
-    return 0.4 * bod_tot + 0.4 * nh4_tot + 0.2 * system_eff
 
-def bio_energy_score(outputs: dict) -> float:
-    return outputs["total_bio_energy_kwh_day"]
+# BIOLOGICAL
+def bio_efficiency_metric(outputs: dict) -> float:
+    bod_tot = outputs.get("BOD_total_eff_pct", 0.0)
+    nh4_tot = outputs.get("NH4_total_eff_pct", 0.0)
+    system_eff = outputs.get("system_efficiency_pct", 0.0)
+    weighted = 0.4 * bod_tot + 0.4 * nh4_tot + 0.2 * system_eff
+    return _normalize(weighted, EFFICIENCY_EXPECTED_RANGES["biological"]["min"], EFFICIENCY_EXPECTED_RANGES["biological"]["max"])
+
+def bio_energy_metric(outputs: dict) -> float:
+    energy = outputs.get("total_bio_energy_kwh_day", 0.0)
+    norm = _normalize(energy, ENERGY_EXPECTED_RANGES["biological"]["min"], ENERGY_EXPECTED_RANGES["biological"]["max"])
+    return 1.0 - norm
 
 def bio_objective(outputs: dict, mode: str = "balanced") -> float:
-    eff = bio_efficiency_score(outputs)
-    energy = bio_energy_score(outputs)
+    eff = bio_efficiency_metric(outputs)
+    eng = bio_energy_metric(outputs)
     if mode == "efficiency":
-        return eff
+        combined = eff
     elif mode == "energy":
-        return -energy
+        combined = eng
     else:
-        return eff - 0.1 * energy
+        combined = 0.8 * eff + 0.2 * eng
+    return _score_to_0_100(combined)
 
 def bio_feasible(outputs: dict) -> bool:
+    # Relaxed constraints but realistic—tweak if you want stricter
     return (
-        outputs["BOD_final_bio_mgL"] <= 50.0
-        and outputs["COD_final_bio_mgL"] <= 150.0
-        and outputs["NH4_final_mgL"] <= 5.0
+        outputs.get("BOD_final_bio_mgL", np.inf) <= 50.0
+        and outputs.get("COD_final_bio_mgL", np.inf) <= 150.0
+        and outputs.get("NH4_final_mgL", np.inf) <= 5.0
     )
 
 # TERTIARY
-def ter_efficiency_score(outputs: dict) -> float:
-    path_removal = outputs["overall_pathogen_removal_pct"]
-    micro_removal = outputs["micropollutant_removal_AOP_pct"]
-    turb_final = outputs["turbidity_final_NTU"]
-    eff = 0.4 * path_removal + 0.4 * micro_removal - 5.0 * turb_final
-    return eff
+def ter_efficiency_metric(outputs: dict) -> float:
+    path_rem = outputs.get("overall_pathogen_removal_pct", 0.0)
+    micro_rem = outputs.get("micropollutant_removal_AOP_pct", 0.0)
+    turb_final = outputs.get("turbidity_final_NTU", 0.0)
+    # convert turbidity to score where lower turbidity improves score
+    turb_score = max(0.0, 100.0 - turb_final * 10.0)  # rough transform; tweakable
+    weighted = 0.4 * path_rem + 0.4 * micro_rem + 0.2 * turb_score
+    return _normalize(weighted, EFFICIENCY_EXPECTED_RANGES["tertiary"]["min"], EFFICIENCY_EXPECTED_RANGES["tertiary"]["max"])
 
-def ter_energy_score(outputs: dict) -> float:
-    return outputs["tertiary_total_energy_kwh_day"]
+def ter_energy_metric(outputs: dict) -> float:
+    energy = outputs.get("tertiary_total_energy_kwh_day", 0.0)
+    norm = _normalize(energy, ENERGY_EXPECTED_RANGES["tertiary"]["min"], ENERGY_EXPECTED_RANGES["tertiary"]["max"])
+    return 1.0 - norm
 
 def ter_objective(outputs: dict, mode: str = "balanced") -> float:
-    eff = ter_efficiency_score(outputs)
-    energy = ter_energy_score(outputs)
+    eff = ter_efficiency_metric(outputs)
+    eng = ter_energy_metric(outputs)
     if mode == "efficiency":
-        return eff
+        combined = eff
     elif mode == "energy":
-        return -energy
+        combined = eng
     else:
-        return eff - 0.05 * energy
+        combined = 0.8 * eff + 0.2 * eng
+    return _score_to_0_100(combined)
 
 def ter_feasible(outputs: dict) -> bool:
     return (
-        outputs["turbidity_final_NTU"] <= 3.0
-        and outputs["Ecoli_final_CFU_100mL"] <= 100.0
-        and outputs["COD_final_ter_mgL"] <= 80.0
-        and outputs["micropollutant_final_ugL"] <= 0.5
+        outputs.get("turbidity_final_NTU", np.inf) <= 3.0
+        and outputs.get("Ecoli_final_CFU_100mL", np.inf) <= 100.0
+        and outputs.get("COD_final_ter_mgL", np.inf) <= 80.0
+        and outputs.get("micropollutant_final_ugL", np.inf) <= 0.5
     )
 
 # ---------------------------------------------------------
 # BENTOML SERVICE
 # ---------------------------------------------------------
-
 @bentoml.service(name="aquasmart_service")
 class AquaSmartService:
     def __init__(self):
+        # Load models once
         self.primary_model = joblib.load(PRIMARY_MODEL_PATH)
         self.biological_model = joblib.load(BIO_MODEL_PATH)
         self.tertiary_model = joblib.load(TERTIARY_MODEL_PATH)
 
+    # ---------- direct endpoints ----------
     @bentoml.api
     def primary(self, request_json: dict) -> dict:
         payload = _unwrap_payload(request_json)
@@ -584,163 +521,203 @@ class AquaSmartService:
         recs = generate_recommendations_tertiary(payload, outputs)
         return {"outputs": outputs, "recommendations": recs}
 
-    # ---------- OPTIMIZATION LOGIC ----------
+    # ---------- progressive search helper (used by optimizers) ----------
+    def _progressive_search(self, run_fn, base_inputs: dict, mode: str, n_samples: int, top_k: int, feasible_check):
+        """
+        run_fn(scale) -> list of candidates with keys inputs, outputs, score
+        progressive strategy:
+          - narrow search scale
+          - if enough feasible -> return top_k feasible
+          - wider search scale
+          - if enough feasible -> return top_k
+          - else if any feasible -> return what we have
+          - else return best overall candidates but mark infeasible + reasons
+        """
+        # narrow
+        narrow_cands = run_fn(scale=0.25, n_samples=n_samples)
+        feasible_narrow = [c for c in narrow_cands if feasible_check(c["outputs"])]
+        if len(feasible_narrow) >= top_k:
+            feasible_narrow.sort(key=lambda c: c["score"], reverse=True)
+            return [{"inputs": c["inputs"], "outputs": c["outputs"], "score": c["score"], "feasible": True} for c in feasible_narrow[:top_k]]
+
+        # wide
+        wide_cands = run_fn(scale=0.6, n_samples=n_samples)
+        feasible_wide = [c for c in wide_cands if feasible_check(c["outputs"])]
+        combined_feasible = sorted(feasible_narrow + feasible_wide, key=lambda c: c["score"], reverse=True)
+        if len(combined_feasible) >= top_k:
+            return [{"inputs": c["inputs"], "outputs": c["outputs"], "score": c["score"], "feasible": True} for c in combined_feasible[:top_k]]
+
+        if combined_feasible:
+            return [{"inputs": c["inputs"], "outputs": c["outputs"], "score": c["score"], "feasible": True} for c in combined_feasible[:min(len(combined_feasible), top_k)]]
+
+        # no feasible - return best overall but mark infeasible and include failure reasons
+        all_cands = sorted(narrow_cands + wide_cands, key=lambda c: c["score"], reverse=True)[:top_k]
+
+        def failed_reasons_primary(outputs: dict) -> List[str]:
+            reasons = []
+            if outputs.get("BOD5_final_mgL", np.inf) > 60.0:
+                reasons.append(f"BOD5_final_mgL={outputs['BOD5_final_mgL']:.2f} > 60")
+            if outputs.get("COD_final_mgL", np.inf) > 150.0:
+                reasons.append(f"COD_final_mgL={outputs['COD_final_mgL']:.2f} > 150")
+            if outputs.get("TSS_final_mgL", np.inf) > 30.0:
+                reasons.append(f"TSS_final_mgL={outputs['TSS_final_mgL']:.2f} > 30")
+            return reasons
+
+        def failed_reasons_bio(outputs: dict) -> List[str]:
+            reasons = []
+            if outputs.get("BOD_final_bio_mgL", np.inf) > 50.0:
+                reasons.append(f"BOD_final_bio_mgL={outputs['BOD_final_bio_mgL']:.2f} > 50")
+            if outputs.get("COD_final_bio_mgL", np.inf) > 150.0:
+                reasons.append(f"COD_final_bio_mgL={outputs['COD_final_bio_mgL']:.2f} > 150")
+            if outputs.get("NH4_final_mgL", np.inf) > 5.0:
+                reasons.append(f"NH4_final_mgL={outputs['NH4_final_mgL']:.2f} > 5")
+            return reasons
+
+        def failed_reasons_ter(outputs: dict) -> List[str]:
+            reasons = []
+            if outputs.get("turbidity_final_NTU", np.inf) > 3.0:
+                reasons.append(f"turbidity_final_NTU={outputs['turbidity_final_NTU']:.2f} > 3")
+            if outputs.get("Ecoli_final_CFU_100mL", np.inf) > 100.0:
+                reasons.append(f"Ecoli_final_CFU_100mL={outputs['Ecoli_final_CFU_100mL']:.2f} > 100")
+            if outputs.get("COD_final_ter_mgL", np.inf) > 80.0:
+                reasons.append(f"COD_final_ter_mgL={outputs['COD_final_ter_mgL']:.2f} > 80")
+            if outputs.get("micropollutant_final_ugL", np.inf) > 0.5:
+                reasons.append(f"micropollutant_final_ugL={outputs['micropollutant_final_ugL']:.3f} > 0.5")
+            return reasons
+
+        out = []
+        for c in all_cands:
+            reasons = []
+            # choose appropriate reasoner based on feasible_check identity
+            if feasible_check == primary_feasible:
+                reasons = failed_reasons_primary(c["outputs"])
+            elif feasible_check == bio_feasible:
+                reasons = failed_reasons_bio(c["outputs"])
+            else:
+                reasons = failed_reasons_ter(c["outputs"])
+
+            out.append({
+                "inputs": c["inputs"],
+                "outputs": c["outputs"],
+                "score": c["score"],
+                "feasible": False,
+                "feasibility_fail_reasons": reasons
+            })
+        return out
+
+    # ---------- OPTIMIZERS (use progressive_search) ----------
 
     def _optimize_primary(self, base_inputs: dict, mode: str, n_samples: int, top_k: int):
-        candidates = []
-        for _ in range(n_samples):
-            cand_inputs = sample_config_around(base_inputs, PRIMARY_OPT_BOUNDS, scale=0.3)
-            for fixed_key in [
-                "Q_in_mld", "temp_C", "pH",
-                "TSS_in_mgL", "BOD5_in_mgL", "COD_in_mgL",
-                "oil_grease_in_mgL", "peak_factor",
-                "screen_type", "grit_type", "clarifier_type",
-                "screen_angle_deg", "side_water_depth_m",
-                "weir_length_m", "saturator_retention_time_min",
-            ]:
-                if fixed_key in base_inputs:
-                    cand_inputs[fixed_key] = base_inputs[fixed_key]
+        def run_fn(scale: float, n_samples: int):
+            cands = []
+            for _ in range(n_samples):
+                cand_inputs = sample_config_around(base_inputs, PRIMARY_OPT_BOUNDS, scale=scale)
+                # keep influent/contaminant & fixed items constant (not allowed to vary)
+                fixed_keys = [
+                    "Q_in_mld", "temp_C", "pH",
+                    "TSS_in_mgL", "BOD5_in_mgL", "COD_in_mgL",
+                    "oil_grease_in_mgL", "peak_factor",
+                    "screen_type", "grit_type", "clarifier_type",
+                    "screen_angle_deg", "side_water_depth_m",
+                    "weir_length_m", "saturator_retention_time_min",
+                ]
+                for fk in fixed_keys:
+                    if fk in base_inputs:
+                        cand_inputs[fk] = base_inputs[fk]
 
-            x = _build_feature_array(cand_inputs, PRIMARY_FEATURE_COLS)
-            y_pred = self.primary_model.predict(x)[0]
-            outputs = dict(zip(PRIMARY_TARGET_COLS, y_pred))
-
-            if primary_feasible(outputs):
+                x = _build_feature_array(cand_inputs, PRIMARY_FEATURE_COLS)
+                y_pred = self.primary_model.predict(x)[0]
+                outputs = dict(zip(PRIMARY_TARGET_COLS, y_pred))
                 score = primary_objective(outputs, mode=mode)
-                candidates.append({"inputs": cand_inputs, "outputs": outputs, "score": score})
+                cands.append({"inputs": cand_inputs, "outputs": outputs, "score": score})
+            return cands
 
-        candidates.sort(key=lambda c: c["score"], reverse=True)
-        return candidates[:top_k]
+        return self._progressive_search(run_fn, base_inputs, mode, n_samples, top_k, primary_feasible)
 
     def _optimize_biological(self, base_inputs: dict, mode: str, n_samples: int, top_k: int):
-        candidates = []
-        for _ in range(n_samples):
-            cand_inputs = sample_config_around(base_inputs, BIO_OPT_BOUNDS, scale=0.3)
-            for fixed_key in [
-                "Q_bio_mld", "temp_C", "pH",
-                "TSS_in_bio_mgL", "BOD5_in_bio_mgL", "COD_in_bio_mgL",
-                "NH4_in_mgL", "NO3_in_mgL", "F_M_ratio_kgkgd",
-            ]:
-                if fixed_key in base_inputs:
-                    cand_inputs[fixed_key] = base_inputs[fixed_key]
+        def run_fn(scale: float, n_samples: int):
+            cands = []
+            for _ in range(n_samples):
+                cand_inputs = sample_config_around(base_inputs, BIO_OPT_BOUNDS, scale=scale)
+                # preserve influent/contamination keys
+                fixed_keys = [
+                    "Q_bio_mld", "temp_C", "pH",
+                    "TSS_in_bio_mgL", "BOD5_in_bio_mgL", "COD_in_bio_mgL",
+                    "NH4_in_mgL", "NO3_in_mgL", "F_M_ratio_kgkgd",
+                ]
+                for fk in fixed_keys:
+                    if fk in base_inputs:
+                        cand_inputs[fk] = base_inputs[fk]
 
-            x = _build_feature_array(cand_inputs, BIO_FEATURE_COLS)
-            y_pred = self.biological_model.predict(x)[0]
-            outputs = dict(zip(BIO_TARGET_COLS, y_pred))
-
-            if bio_feasible(outputs):
+                x = _build_feature_array(cand_inputs, BIO_FEATURE_COLS)
+                y_pred = self.biological_model.predict(x)[0]
+                outputs = dict(zip(BIO_TARGET_COLS, y_pred))
                 score = bio_objective(outputs, mode=mode)
-                candidates.append({"inputs": cand_inputs, "outputs": outputs, "score": score})
+                cands.append({"inputs": cand_inputs, "outputs": outputs, "score": score})
+            return cands
 
-        candidates.sort(key=lambda c: c["score"], reverse=True)
-        return candidates[:top_k]
+        return self._progressive_search(run_fn, base_inputs, mode, n_samples, top_k, bio_feasible)
 
     def _optimize_tertiary(self, base_inputs: dict, mode: str, n_samples: int, top_k: int):
-        candidates = []
-        for _ in range(n_samples):
-            cand_inputs = sample_config_around(base_inputs, TER_OPT_BOUNDS, scale=0.3)
-            for fixed_key in [
-                "Q_ter_mld", "temp_C", "pH_bulk",
-                "TSS_after_bio_mgL", "turbidity_in_NTU",
-                "BOD_in_ter_mgL", "COD_in_ter_mgL",
-                "NH4_in_ter_mgL", "NO3_in_ter_mgL", "TP_in_ter_mgL",
-                "Ecoli_in_CFU_100mL", "micropollutant_in_ugL",
-                "flux_LMH",
-            ]:
-                if fixed_key in base_inputs:
-                    cand_inputs[fixed_key] = base_inputs[fixed_key]
+        def run_fn(scale: float, n_samples: int):
+            cands = []
+            for _ in range(n_samples):
+                cand_inputs = sample_config_around(base_inputs, TER_OPT_BOUNDS, scale=scale)
+                fixed_keys = [
+                    "Q_ter_mld", "temp_C", "pH_bulk",
+                    "TSS_after_bio_mgL", "turbidity_in_NTU",
+                    "BOD_in_ter_mgL", "COD_in_ter_mgL",
+                    "NH4_in_ter_mgL", "NO3_in_ter_mgL", "TP_in_ter_mgL",
+                    "Ecoli_in_CFU_100mL", "micropollutant_in_ugL",
+                    "flux_LMH",
+                ]
+                for fk in fixed_keys:
+                    if fk in base_inputs:
+                        cand_inputs[fk] = base_inputs[fk]
 
-            x = _build_feature_array(cand_inputs, TER_FEATURE_COLS)
-            y_pred = self.tertiary_model.predict(x)[0]
-            outputs = dict(zip(TER_TARGET_COLS, y_pred))
-
-            if ter_feasible(outputs):
+                x = _build_feature_array(cand_inputs, TER_FEATURE_COLS)
+                y_pred = self.tertiary_model.predict(x)[0]
+                outputs = dict(zip(TER_TARGET_COLS, y_pred))
                 score = ter_objective(outputs, mode=mode)
-                candidates.append({"inputs": cand_inputs, "outputs": outputs, "score": score})
+                cands.append({"inputs": cand_inputs, "outputs": outputs, "score": score})
+            return cands
 
-        candidates.sort(key=lambda c: c["score"], reverse=True)
-        return candidates[:top_k]
+        return self._progressive_search(run_fn, base_inputs, mode, n_samples, top_k, ter_feasible)
 
     # ---------- PUBLIC OPTIMIZATION ENDPOINTS ----------
-
     @bentoml.api
     def primary_optimize(self, request_json: dict) -> dict:
         payload = _unwrap_payload(request_json)
-        best = self._optimize_primary(
-            payload["current_config"],
-            payload.get("mode", "balanced"),
-            int(payload.get("n_samples", 100)),
-            int(payload.get("top_k", 5)),
-        )
-        return {
-            "stage": "primary",
-            "mode": payload.get("mode", "balanced"),
-            "num_candidates": len(best),
-            "candidates": [
-                {
-                    "inputs": c["inputs"],
-                    "outputs": c["outputs"],
-                    "score": c["score"],
-                    "feasible": True,  # ✅ explicitly mark feasible
-                    "recommendations": generate_recommendations_primary(
-                        c["inputs"], c["outputs"]
-                    ),
-                }
-                for c in best
-            ],
-        }
+        current = payload.get("current_config", {})
+        mode = payload.get("mode", "balanced")
+        n_samples = int(payload.get("n_samples", 100))
+        top_k = int(payload.get("top_k", 5))
+        best = self._optimize_primary(current, mode, n_samples, top_k)
+        # ensure recommendations attached
+        for c in best:
+            c.setdefault("recommendations", generate_recommendations_primary(c["inputs"], c["outputs"]))
+        return {"stage": "primary", "mode": mode, "num_candidates": len(best), "candidates": best}
 
     @bentoml.api
     def biological_optimize(self, request_json: dict) -> dict:
         payload = _unwrap_payload(request_json)
-        best = self._optimize_biological(
-            payload["current_config"],
-            payload.get("mode", "balanced"),
-            int(payload.get("n_samples", 100)),
-            int(payload.get("top_k", 5)),
-        )
-        return {
-            "stage": "biological",
-            "mode": payload.get("mode", "balanced"),
-            "num_candidates": len(best),
-            "candidates": [
-                {
-                    "inputs": c["inputs"],
-                    "outputs": c["outputs"],
-                    "score": c["score"],
-                    "feasible": True,  # ✅ explicitly mark feasible
-                    "recommendations": generate_recommendations_biological(
-                        c["inputs"], c["outputs"]
-                    ),
-                }
-                for c in best
-            ],
-        }
+        current = payload.get("current_config", {})
+        mode = payload.get("mode", "balanced")
+        n_samples = int(payload.get("n_samples", 100))
+        top_k = int(payload.get("top_k", 5))
+        best = self._optimize_biological(current, mode, n_samples, top_k)
+        for c in best:
+            c.setdefault("recommendations", generate_recommendations_biological(c["inputs"], c["outputs"]))
+        return {"stage": "biological", "mode": mode, "num_candidates": len(best), "candidates": best}
 
     @bentoml.api
     def tertiary_optimize(self, request_json: dict) -> dict:
         payload = _unwrap_payload(request_json)
-        best = self._optimize_tertiary(
-            payload["current_config"],
-            payload.get("mode", "balanced"),
-            int(payload.get("n_samples", 100)),
-            int(payload.get("top_k", 5)),
-        )
-        return {
-            "stage": "tertiary",
-            "mode": payload.get("mode", "balanced"),
-            "num_candidates": len(best),
-            "candidates": [
-                {
-                    "inputs": c["inputs"],
-                    "outputs": c["outputs"],
-                    "score": c["score"],
-                    "feasible": True,  # ✅ explicitly mark feasible
-                    "recommendations": generate_recommendations_tertiary(
-                        c["inputs"], c["outputs"]
-                    ),
-                }
-                for c in best
-            ],
-        }
-
+        current = payload.get("current_config", {})
+        mode = payload.get("mode", "balanced")
+        n_samples = int(payload.get("n_samples", 100))
+        top_k = int(payload.get("top_k", 5))
+        best = self._optimize_tertiary(current, mode, n_samples, top_k)
+        for c in best:
+            c.setdefault("recommendations", generate_recommendations_tertiary(c["inputs"], c["outputs"]))
+        return {"stage": "tertiary", "mode": mode, "num_candidates": len(best), "candidates": best}
